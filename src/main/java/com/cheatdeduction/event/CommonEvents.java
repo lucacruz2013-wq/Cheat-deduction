@@ -25,7 +25,9 @@ import net.minecraft.world.entity.projectile.AbstractArrow;
 import net.minecraft.world.phys.AABB;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.entity.EntityJoinLevelEvent;
+import net.minecraftforge.event.entity.living.LivingAttackEvent;
 import net.minecraftforge.event.entity.living.LivingChangeTargetEvent;
+import net.minecraftforge.event.entity.living.LivingFallEvent;
 import net.minecraftforge.event.entity.living.LivingDeathEvent;
 import net.minecraftforge.event.entity.living.LivingHurtEvent;
 import net.minecraftforge.event.entity.player.PlayerEvent;
@@ -57,14 +59,14 @@ public final class CommonEvents {
         if (e.phase != TickEvent.Phase.END || !(e.player instanceof ServerPlayer p)) return;
         Cheat cheat = GameManager.getCheat(p.getUUID());
 
-        // SPEED: +15% (MULTIPLY_TOTAL) apenas enquanto correndo
+        // SPEED: +22% (MULTIPLY_TOTAL) apenas enquanto correndo
         AttributeInstance speed = p.getAttribute(Attributes.MOVEMENT_SPEED);
         if (speed != null) {
             boolean want = cheat == Cheat.SPEED && p.isSprinting();
             boolean has = speed.getModifier(SPEED_ID) != null;
             if (want && !has) {
                 speed.addTransientModifier(new AttributeModifier(SPEED_ID, "cheatdeduction_speed",
-                        0.15D, AttributeModifier.Operation.MULTIPLY_TOTAL));
+                        0.22D, AttributeModifier.Operation.MULTIPLY_TOTAL));
             } else if (!want && has) {
                 speed.removeModifier(SPEED_ID);
             }
@@ -95,27 +97,28 @@ public final class CommonEvents {
     }
 
     /**
-     * Varre os Mob a 32 blocos a cada tick: quem tem o jogador como alvo (setTarget ou memórias
-     * ATTACK_TARGET / NEAREST_VISIBLE_ATTACKABLE_PLAYER do brain) perde o alvo, para a navegação
-     * e tem as memórias apagadas. Mobs que não miram o jogador não são afetados.
+     * Mobs a 32 blocos que miram o jogador agachado esquecem dele usando APENAS
+     * setTarget(null), setLastHurtByMob(null) e getNavigation().stop(). O Brain só é tocado dentro
+     * de try-catch e apenas MemoryModuleType.ATTACK_TARGET (após hasMemoryValue).
      */
     private static void blindMobs(ServerPlayer p) {
         AABB area = p.getBoundingBox().inflate(MOB_SWEEP_RADIUS);
         double maxSqr = MOB_SWEEP_RADIUS * MOB_SWEEP_RADIUS;
         for (Mob mob : p.serverLevel().getEntitiesOfClass(Mob.class, area, m -> m.distanceToSqr(p) <= maxSqr)) {
-            Brain<?> brain = mob.getBrain();
-            boolean remembered =
-                    brain.getMemory(MemoryModuleType.ATTACK_TARGET).filter(t -> t == p).isPresent()
-                    || brain.getMemory(MemoryModuleType.NEAREST_VISIBLE_ATTACKABLE_PLAYER).filter(t -> t == p).isPresent();
-            if (mob.getTarget() != p && !remembered) continue;
-
-            mob.setTarget(null);
-            mob.getNavigation().stop();
-            if (brain.hasMemoryValue(MemoryModuleType.ATTACK_TARGET)) {
-                brain.eraseMemory(MemoryModuleType.ATTACK_TARGET);
+            boolean brainTarget = false;
+            try {
+                Brain<?> brain = mob.getBrain();
+                if (brain.hasMemoryValue(MemoryModuleType.ATTACK_TARGET)) {
+                    brainTarget = brain.getMemory(MemoryModuleType.ATTACK_TARGET).filter(t -> t == p).isPresent();
+                    if (brainTarget) brain.eraseMemory(MemoryModuleType.ATTACK_TARGET);
+                }
+            } catch (Exception ignored) {
+                // mobs sem Brain utilizável: ignora
             }
-            if (brain.hasMemoryValue(MemoryModuleType.NEAREST_VISIBLE_ATTACKABLE_PLAYER)) {
-                brain.eraseMemory(MemoryModuleType.NEAREST_VISIBLE_ATTACKABLE_PLAYER);
+            if (brainTarget || mob.getTarget() == p || mob.getLastHurtByMob() == p) {
+                mob.setTarget(null);
+                mob.setLastHurtByMob(null);
+                mob.getNavigation().stop();
             }
         }
     }
@@ -143,7 +146,28 @@ public final class CommonEvents {
         }
     }
 
-    // ------------------------------------------------------------ FALLDAMAGE / KILLBOT
+    // ------------------------------------------------------------ FALLDAMAGE (sem dano, sem tremor)
+
+    /** Cancela antes de LivingEntity#hurt: sem dano, sem animação de hurt e sem tilt de câmera. */
+    @SubscribeEvent
+    public static void onAttack(LivingAttackEvent e) {
+        if (e.getEntity() instanceof ServerPlayer p
+                && e.getSource().is(DamageTypes.FALL)
+                && GameManager.getCheat(p.getUUID()) == Cheat.FALLDAMAGE) {
+            e.setCanceled(true);
+        }
+    }
+
+    /** Cancela o cálculo de dano de queda (evita também o som de impacto e o hurt). */
+    @SubscribeEvent
+    public static void onFall(LivingFallEvent e) {
+        if (e.getEntity() instanceof ServerPlayer p
+                && GameManager.getCheat(p.getUUID()) == Cheat.FALLDAMAGE) {
+            e.setCanceled(true);
+        }
+    }
+
+    // ------------------------------------------------------------ FALLDAMAGE (fallback) / KILLBOT
 
     @SubscribeEvent
     public static void onHurt(LivingHurtEvent e) {

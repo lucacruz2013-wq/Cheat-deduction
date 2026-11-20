@@ -7,9 +7,12 @@ import net.minecraft.client.renderer.RenderType;
 import org.lwjgl.opengl.GL11;
 
 /**
- * RenderType de linhas que ignora a profundidade (DepthTest GL_ALWAYS) e é opaco (alpha 1.0),
- * desenhando contornos através de todas as paredes.
- * Estende RenderType apenas para acessar os RenderStateShard protegidos.
+ * RenderType de linhas opacas (alpha 1.0) para o X-Ray do cheat MINING.
+ *
+ * ATENÇÃO: DepthTestStateShard com GL_ALWAYS (519) é um no-op no setup/clear do vanilla
+ * (ele simplesmente não mexe no estado). Por isso o teste de profundidade é desligado
+ * explicitamente em ClientEvents (RenderSystem.disableDepthTest + depthMask(false)) ao redor
+ * do endBatch, que é quando as linhas são realmente desenhadas.
  */
 public final class XrayRenderTypes extends RenderType {
 
@@ -28,7 +31,7 @@ public final class XrayRenderTypes extends RenderType {
             RenderType.CompositeState.builder()
                     .setShaderState(RENDERTYPE_LINES_SHADER)
                     .setLineState(new LineStateShard(OptionalDouble.of(3.0D)))
-                    .setLayeringState(VIEW_OFFSET_Z_LAYERING)
+                    .setLayeringState(NO_LAYERING)
                     .setTransparencyState(NO_TRANSPARENCY)
                     .setWriteMaskState(COLOR_WRITE)
                     .setCullState(NO_CULL)

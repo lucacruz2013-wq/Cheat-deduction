@@ -3,6 +3,7 @@ package com.cheatdeduction.client;
 import com.cheatdeduction.Cheat;
 import com.cheatdeduction.CheatDeductionMod;
 import com.cheatdeduction.tracking.LastLookTracker;
+import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import java.util.ArrayList;
@@ -18,6 +19,7 @@ import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.EntityHitResult;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.client.event.ClientPlayerNetworkEvent;
@@ -25,17 +27,20 @@ import net.minecraftforge.client.event.RenderLevelStageEvent;
 import net.minecraftforge.client.event.RenderPlayerEvent;
 import net.minecraftforge.common.Tags;
 import net.minecraftforge.event.TickEvent;
+import net.minecraftforge.event.entity.living.LivingFallEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.registries.ForgeRegistries;
 
-/** Lógica client-side: MINING (X-Ray), AIM_LOCK e render do INVISIBLE. */
+/** Lógica client-side: MINING (X-Ray), AIM_LOCK, render do INVISIBLE e tilt do FALLDAMAGE. */
 @Mod.EventBusSubscriber(modid = CheatDeductionMod.MODID, value = Dist.CLIENT, bus = Mod.EventBusSubscriber.Bus.FORGE)
 public final class ClientEvents {
     private static final int ORE_RADIUS = 32;
     private static final int SCAN_INTERVAL_TICKS = 20;
-    private static final int AIM_TICKS_REQUIRED = 60;     // 3 s
-    private static final double AIM_RELEASE_DISTANCE = 25.0D;
+
+    private static final double AIM_RANGE = 25.0D;
+    private static final int AIM_TICKS_REQUIRED = 60;   // 3 s olhando
+    private static final int AIM_LOCK_DURATION = 40;    // 2 s travado
 
     private record OreBox(BlockPos pos, float r, float g, float b) {}
 
@@ -45,10 +50,12 @@ public final class ClientEvents {
     private static int scanCooldown;
 
     // AIM_LOCK
-    private static final LastLookTracker LOOK = new LastLookTracker();
     private static LivingEntity aimTarget;
     private static int aimTicks;
-    private static boolean aimLocked;
+    private static int lockRemaining;
+
+    // FALLDAMAGE (fallback visual)
+    private static int fallHurtSuppress;
 
     private ClientEvents() {}
 
@@ -74,6 +81,7 @@ public final class ClientEvents {
 
         Cheat cheat = ClientCheatState.get();
 
+        // MINING
         if (cheat != Cheat.MINING) {
             miningOn = false;
             ores = List.of();
@@ -86,27 +94,46 @@ public final class ClientEvents {
             ores = List.of();
         }
 
+        // AIM_LOCK
         if (cheat == Cheat.AIM_LOCK && !mc.isPaused()) tickAimLock(mc);
         else resetAim();
+
+        // FALLDAMAGE: zera o hurtTime só logo após uma queda (não esconde dano de mobs).
+        // hurtDuration NÃO é zerado: GameRenderer#bobHurt divide por ele (risco de NaN na câmera).
+        if (cheat == Cheat.FALLDAMAGE && fallHurtSuppress > 0) {
+            fallHurtSuppress--;
+            mc.player.hurtTime = 0;
+        }
     }
 
     private static void resetAim() {
         aimTarget = null;
         aimTicks = 0;
-        aimLocked = false;
-        LOOK.clear();
+        lockRemaining = 0;
     }
 
     private static void resetAll() {
         resetAim();
         miningOn = false;
         ores = List.of();
+        fallHurtSuppress = 0;
     }
 
     @SubscribeEvent
     public static void onLogout(ClientPlayerNetworkEvent.LoggingOut e) {
         ClientCheatState.set(null);
         resetAll();
+    }
+
+    // ------------------------------------------------------------------ FALLDAMAGE (cliente)
+
+    @SubscribeEvent
+    public static void onLocalFall(LivingFallEvent e) {
+        Minecraft mc = Minecraft.getInstance();
+        if (e.getEntity() == mc.player && ClientCheatState.get() == Cheat.FALLDAMAGE) {
+            fallHurtSuppress = 10;
+            e.setCanceled(true);
+        }
     }
 
     // ------------------------------------------------------------------ MINING (X-Ray, raio 32)
@@ -151,39 +178,47 @@ public final class ClientEvents {
 
     @SubscribeEvent
     public static void onRenderLevel(RenderLevelStageEvent e) {
-        if (e.getStage() != RenderLevelStageEvent.Stage.AFTER_PARTICLES) return;
+        if (e.getStage() != RenderLevelStageEvent.Stage.AFTER_TRANSLUCENT_BLOCKS) return;
         if (!miningOn || ores.isEmpty() || ClientCheatState.get() != Cheat.MINING) return;
 
         Minecraft mc = Minecraft.getInstance();
         PoseStack ps = e.getPoseStack();
         Vec3 cam = e.getCamera().getPosition();
         MultiBufferSource.BufferSource buffers = mc.renderBuffers().bufferSource();
-        VertexConsumer vc = buffers.getBuffer(XrayRenderTypes.LINES_NO_DEPTH);
 
-        ps.pushPose();
-        ps.translate(-cam.x, -cam.y, -cam.z);
-        for (OreBox o : ores) {
-            // alpha = 1.0f: contornos sólidos e brilhantes, visíveis através de qualquer parede
-            LevelRenderer.renderLineBox(ps, vc, new AABB(o.pos()).inflate(0.002D), o.r(), o.g(), o.b(), 1.0F);
+        // Profundidade desligada ANTES de desenhar e reativada DEPOIS do endBatch
+        // (as linhas só vão para a GPU no endBatch).
+        RenderSystem.disableDepthTest();
+        RenderSystem.depthMask(false);
+        try {
+            VertexConsumer vc = buffers.getBuffer(XrayRenderTypes.LINES_NO_DEPTH);
+            ps.pushPose();
+            ps.translate(-cam.x, -cam.y, -cam.z);
+            for (OreBox o : ores) {
+                // alpha = 1.0f: contornos nítidos e brilhantes através de qualquer parede
+                LevelRenderer.renderLineBox(ps, vc, new AABB(o.pos()).inflate(0.002D), o.r(), o.g(), o.b(), 1.0F);
+            }
+            ps.popPose();
+            buffers.endBatch(XrayRenderTypes.LINES_NO_DEPTH);
+        } finally {
+            RenderSystem.depthMask(true);
+            RenderSystem.enableDepthTest();
         }
-        ps.popPose();
-        buffers.endBatch(XrayRenderTypes.LINES_NO_DEPTH);
     }
 
     // ------------------------------------------------------------------ INVISIBLE (render)
 
     /**
-     * Jogador invisível e agachado => cancela o render por completo (corpo, armadura, itens
-     * na mão e nametag). O servidor só deixa o jogador invisível agachado com o cheat INVISIBLE;
-     * para o jogador local usamos o estado do cheat sincronizado.
+     * Agachado + invisível => cancela o render por completo (corpo, armadura, itens nas mãos e
+     * nametag). O servidor só deixa o jogador invisível agachado com o cheat INVISIBLE; para o
+     * jogador local usamos também o estado do cheat sincronizado.
      */
     @SubscribeEvent
     public static void onRenderPlayer(RenderPlayerEvent.Pre e) {
         Player p = e.getEntity();
         if (p.isSpectator() || !p.isCrouching()) return;
-        boolean local = p == Minecraft.getInstance().player;
-        boolean hasCheat = local && ClientCheatState.get() == Cheat.INVISIBLE;
-        if (hasCheat || p.isInvisible()) {
+        boolean localWithCheat = p == Minecraft.getInstance().player && ClientCheatState.get() == Cheat.INVISIBLE;
+        if (localWithCheat || p.isInvisible()) {
             e.setCanceled(true);
         }
     }
@@ -191,8 +226,9 @@ public final class ClientEvents {
     // ------------------------------------------------------------------ AIM_LOCK
 
     /**
-     * Mira diretamente numa hitbox viva por 60 ticks => trava a câmera no centro da hitbox
-     * até a entidade morrer ou passar de 25 blocos. Usa o mesmo LastLookTracker do NO_MISS.
+     * Mantendo a mira (ProjectileUtil, 25 blocos, linha de visão livre) na mesma entidade viva
+     * (mobs OU outros jogadores) por 60 ticks => trava a câmera no centro da hitbox por 40 ticks.
+     * Depois solta a câmera e zera o contador.
      */
     private static void tickAimLock(Minecraft mc) {
         LocalPlayer p = mc.player;
@@ -202,29 +238,36 @@ public final class ClientEvents {
         }
         if (mc.screen != null) return; // menu aberto: não mexe na câmera
 
-        LivingEntity looked = LOOK.update(p);
-
-        if (aimLocked) {
-            if (aimTarget == null || !aimTarget.isAlive() || p.distanceTo(aimTarget) > AIM_RELEASE_DISTANCE) {
-                resetAim(); // morreu ou ficou longe demais: libera
+        if (lockRemaining <= 0) {
+            LivingEntity looked = lookedEntity(p);
+            if (looked == null) {
+                aimTarget = null;
+                aimTicks = 0;
                 return;
             }
-            lockOn(p, aimTarget);
-            return;
+            if (looked != aimTarget) {
+                aimTarget = looked;
+                aimTicks = 0;
+                return;
+            }
+            if (++aimTicks < AIM_TICKS_REQUIRED) return;
+            lockRemaining = AIM_LOCK_DURATION; // inicia a trava de 2 s
         }
 
-        if (looked == null || p.distanceTo(looked) > AIM_RELEASE_DISTANCE) {
-            aimTarget = null;
-            aimTicks = 0;
+        // trava ativa
+        if (aimTarget == null || !aimTarget.isAlive()) {
+            resetAim();
             return;
         }
-        if (looked != aimTarget) {
-            aimTarget = looked;
-            aimTicks = 0;
-        } else if (++aimTicks >= AIM_TICKS_REQUIRED) {
-            aimLocked = true;
-            lockOn(p, looked);
-        }
+        lockOn(p, aimTarget);
+        if (--lockRemaining <= 0) resetAim(); // solta a câmera e zera o contador
+    }
+
+    /** Entidade viva (inclui Players, exceto o próprio) na cruz de mira, 25 blocos, sem blocos no meio. */
+    private static LivingEntity lookedEntity(LocalPlayer p) {
+        EntityHitResult hit = LastLookTracker.raycast(p, AIM_RANGE);
+        if (hit == null || !(hit.getEntity() instanceof LivingEntity le) || le == p) return null;
+        return p.hasLineOfSight(le) ? le : null;
     }
 
     /** Aponta a câmera para o centro da hitbox via setYRot/setXRot. */
