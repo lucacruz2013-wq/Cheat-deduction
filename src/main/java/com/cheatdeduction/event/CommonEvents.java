@@ -4,17 +4,25 @@ import com.cheatdeduction.Cheat;
 import com.cheatdeduction.CheatDeductionMod;
 import com.cheatdeduction.ballistics.BallisticSolver;
 import com.cheatdeduction.game.GameManager;
+import com.cheatdeduction.tracking.LastLookTracker;
 import java.util.UUID;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.tags.DamageTypeTags;
+import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.damagesource.DamageTypes;
 import net.minecraft.world.effect.MobEffects;
+import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.ai.attributes.AttributeInstance;
 import net.minecraft.world.entity.ai.attributes.AttributeModifier;
 import net.minecraft.world.entity.ai.attributes.Attributes;
+import net.minecraft.world.entity.ai.Brain;
+import net.minecraft.world.entity.ai.memory.MemoryModuleType;
 import net.minecraft.world.entity.boss.enderdragon.EnderDragon;
 import net.minecraft.world.entity.player.Abilities;
+import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.entity.projectile.AbstractArrow;
+import net.minecraft.world.phys.AABB;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.entity.EntityJoinLevelEvent;
 import net.minecraftforge.event.entity.living.LivingChangeTargetEvent;
@@ -31,10 +39,11 @@ import net.minecraftforge.server.ServerLifecycleHooks;
 public final class CommonEvents {
     private static final UUID SPEED_ID = UUID.fromString("7d1c3f0e-6a52-4a2f-9a43-5c1d2e8b9a10");
     private static final String NOMISS_TAG = "cheatdeduction_nomiss_done";
+    private static final double MOB_SWEEP_RADIUS = 32.0D;
 
     private CommonEvents() {}
 
-    // ------------------------------------------------------------ tick (SPEED / INVISIBLE / FLY)
+    // ------------------------------------------------------------ tick
 
     @SubscribeEvent
     public static void onServerTick(TickEvent.ServerTickEvent e) {
@@ -61,12 +70,13 @@ public final class CommonEvents {
             }
         }
 
-        // INVISIBLE: invisível enquanto agachado
+        // INVISIBLE: invisível enquanto agachado + mobs próximos esquecem o jogador
         if (cheat == Cheat.INVISIBLE) {
-            boolean want = p.isCrouching();
-            if (p.isInvisible() != want && !p.hasEffect(MobEffects.INVISIBILITY)) {
-                p.setInvisible(want);
+            boolean crouching = p.isCrouching();
+            if (p.isInvisible() != crouching && !p.hasEffect(MobEffects.INVISIBILITY)) {
+                p.setInvisible(crouching);
             }
+            if (crouching) blindMobs(p);
         }
 
         // FLY: mayfly no survival
@@ -75,6 +85,37 @@ public final class CommonEvents {
             if (!ab.mayfly) {
                 ab.mayfly = true;
                 p.onUpdateAbilities();
+            }
+        }
+
+        // NO_MISS: registra a última entidade olhada (raio de 40 blocos, memória de 100 ticks)
+        if (cheat == Cheat.NO_MISS) {
+            LastLookTracker.server(p.getUUID()).update(p);
+        }
+    }
+
+    /**
+     * Varre os Mob a 32 blocos a cada tick: quem tem o jogador como alvo (setTarget ou memórias
+     * ATTACK_TARGET / NEAREST_VISIBLE_ATTACKABLE_PLAYER do brain) perde o alvo, para a navegação
+     * e tem as memórias apagadas. Mobs que não miram o jogador não são afetados.
+     */
+    private static void blindMobs(ServerPlayer p) {
+        AABB area = p.getBoundingBox().inflate(MOB_SWEEP_RADIUS);
+        double maxSqr = MOB_SWEEP_RADIUS * MOB_SWEEP_RADIUS;
+        for (Mob mob : p.serverLevel().getEntitiesOfClass(Mob.class, area, m -> m.distanceToSqr(p) <= maxSqr)) {
+            Brain<?> brain = mob.getBrain();
+            boolean remembered =
+                    brain.getMemory(MemoryModuleType.ATTACK_TARGET).filter(t -> t == p).isPresent()
+                    || brain.getMemory(MemoryModuleType.NEAREST_VISIBLE_ATTACKABLE_PLAYER).filter(t -> t == p).isPresent();
+            if (mob.getTarget() != p && !remembered) continue;
+
+            mob.setTarget(null);
+            mob.getNavigation().stop();
+            if (brain.hasMemoryValue(MemoryModuleType.ATTACK_TARGET)) {
+                brain.eraseMemory(MemoryModuleType.ATTACK_TARGET);
+            }
+            if (brain.hasMemoryValue(MemoryModuleType.NEAREST_VISIBLE_ATTACKABLE_PLAYER)) {
+                brain.eraseMemory(MemoryModuleType.NEAREST_VISIBLE_ATTACKABLE_PLAYER);
             }
         }
     }
@@ -97,6 +138,7 @@ public final class CommonEvents {
                     p.onUpdateAbilities();
                 }
             }
+            case NO_MISS -> LastLookTracker.removeServer(p.getUUID());
             default -> { }
         }
     }
@@ -105,19 +147,25 @@ public final class CommonEvents {
 
     @SubscribeEvent
     public static void onHurt(LivingHurtEvent e) {
+        DamageSource source = e.getSource();
+
         if (e.getEntity() instanceof ServerPlayer victim
-                && e.getSource().is(DamageTypes.FALL)
+                && source.is(DamageTypes.FALL)
                 && GameManager.getCheat(victim.getUUID()) == Cheat.FALLDAMAGE) {
             e.setCanceled(true);
             return;
         }
-        if (e.getSource().getEntity() instanceof ServerPlayer attacker
-                && GameManager.getCheat(attacker.getUUID()) == Cheat.KILLBOT) {
+
+        // KILLBOT (nerf): sem instakill por projéteis e nunca em outros jogadores
+        if (source.getEntity() instanceof ServerPlayer attacker
+                && GameManager.getCheat(attacker.getUUID()) == Cheat.KILLBOT
+                && !source.is(DamageTypeTags.IS_PROJECTILE)
+                && !(e.getEntity() instanceof Player)) {
             e.setAmount(Float.MAX_VALUE);
         }
     }
 
-    // ------------------------------------------------------------ INVISIBLE (mobs)
+    // ------------------------------------------------------------ INVISIBLE (alvos de mobs)
 
     @SubscribeEvent
     public static void onChangeTarget(LivingChangeTargetEvent e) {
@@ -159,11 +207,15 @@ public final class CommonEvents {
 
     @SubscribeEvent
     public static void onLogout(PlayerEvent.PlayerLoggedOutEvent e) {
-        if (e.getEntity() instanceof ServerPlayer p) GameManager.onLogout(p);
+        if (e.getEntity() instanceof ServerPlayer p) {
+            LastLookTracker.removeServer(p.getUUID());
+            GameManager.onLogout(p);
+        }
     }
 
     @SubscribeEvent
     public static void onServerStopped(ServerStoppedEvent e) {
+        LastLookTracker.clearServer();
         GameManager.reset();
     }
 }

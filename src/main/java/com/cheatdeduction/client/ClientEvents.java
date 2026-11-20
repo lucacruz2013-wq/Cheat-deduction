@@ -2,6 +2,7 @@ package com.cheatdeduction.client;
 
 import com.cheatdeduction.Cheat;
 import com.cheatdeduction.CheatDeductionMod;
+import com.cheatdeduction.tracking.LastLookTracker;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import java.util.ArrayList;
@@ -10,12 +11,10 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.client.renderer.LevelRenderer;
 import net.minecraft.client.renderer.MultiBufferSource;
-import net.minecraft.commands.arguments.EntityAnchorArgument;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.LivingEntity;
-import net.minecraft.world.entity.decoration.ArmorStand;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
@@ -33,10 +32,10 @@ import net.minecraftforge.registries.ForgeRegistries;
 /** Lógica client-side: MINING (X-Ray), AIM_LOCK e render do INVISIBLE. */
 @Mod.EventBusSubscriber(modid = CheatDeductionMod.MODID, value = Dist.CLIENT, bus = Mod.EventBusSubscriber.Bus.FORGE)
 public final class ClientEvents {
-    private static final int ORE_RADIUS = 20;
-    private static final int SCAN_INTERVAL_TICKS = 10;
-    private static final int AIM_TICKS_REQUIRED = 60; // 3 s
-    private static final double AIM_RANGE = 48.0D;
+    private static final int ORE_RADIUS = 32;
+    private static final int SCAN_INTERVAL_TICKS = 20;
+    private static final int AIM_TICKS_REQUIRED = 60;     // 3 s
+    private static final double AIM_RELEASE_DISTANCE = 25.0D;
 
     private record OreBox(BlockPos pos, float r, float g, float b) {}
 
@@ -46,6 +45,7 @@ public final class ClientEvents {
     private static int scanCooldown;
 
     // AIM_LOCK
+    private static final LastLookTracker LOOK = new LastLookTracker();
     private static LivingEntity aimTarget;
     private static int aimTicks;
     private static boolean aimLocked;
@@ -94,6 +94,7 @@ public final class ClientEvents {
         aimTarget = null;
         aimTicks = 0;
         aimLocked = false;
+        LOOK.clear();
     }
 
     private static void resetAll() {
@@ -108,7 +109,7 @@ public final class ClientEvents {
         resetAll();
     }
 
-    // ------------------------------------------------------------------ MINING (X-Ray)
+    // ------------------------------------------------------------------ MINING (X-Ray, raio 32)
 
     private static void scanOres(Minecraft mc) {
         List<OreBox> found = new ArrayList<>();
@@ -121,6 +122,7 @@ public final class ClientEvents {
                     if (x * x + y * y + z * z > r2) continue;
                     m.set(c.getX() + x, c.getY() + y, c.getZ() + z);
                     BlockState st = mc.level.getBlockState(m);
+                    if (st.isAir()) continue;
                     if (st.is(Tags.Blocks.ORES)) {
                         float[] col = colorFor(st);
                         found.add(new OreBox(m.immutable(), col[0], col[1], col[2]));
@@ -138,7 +140,7 @@ public final class ClientEvents {
         if (n.contains("emerald")) return new float[] {0.1F, 1.0F, 0.2F};
         if (n.contains("gold")) return new float[] {1.0F, 0.85F, 0.1F};
         if (n.contains("iron")) return new float[] {0.95F, 0.7F, 0.55F};
-        if (n.contains("coal")) return new float[] {0.4F, 0.4F, 0.4F};
+        if (n.contains("coal")) return new float[] {0.45F, 0.45F, 0.45F};
         if (n.contains("redstone")) return new float[] {1.0F, 0.1F, 0.1F};
         if (n.contains("lapis")) return new float[] {0.2F, 0.35F, 1.0F};
         if (n.contains("copper")) return new float[] {1.0F, 0.5F, 0.2F};
@@ -161,6 +163,7 @@ public final class ClientEvents {
         ps.pushPose();
         ps.translate(-cam.x, -cam.y, -cam.z);
         for (OreBox o : ores) {
+            // alpha = 1.0f: contornos sólidos e brilhantes, visíveis através de qualquer parede
             LevelRenderer.renderLineBox(ps, vc, new AABB(o.pos()).inflate(0.002D), o.r(), o.g(), o.b(), 1.0F);
         }
         ps.popPose();
@@ -170,79 +173,70 @@ public final class ClientEvents {
     // ------------------------------------------------------------------ INVISIBLE (render)
 
     /**
-     * Jogador invisível + agachado => cancela o render por completo (corpo, armadura,
-     * itens e nametag). O servidor só deixa o jogador invisível agachado com o cheat INVISIBLE.
+     * Jogador invisível e agachado => cancela o render por completo (corpo, armadura, itens
+     * na mão e nametag). O servidor só deixa o jogador invisível agachado com o cheat INVISIBLE;
+     * para o jogador local usamos o estado do cheat sincronizado.
      */
     @SubscribeEvent
     public static void onRenderPlayer(RenderPlayerEvent.Pre e) {
         Player p = e.getEntity();
-        if (p.isInvisible() && p.isCrouching() && !p.isSpectator()) {
+        if (p.isSpectator() || !p.isCrouching()) return;
+        boolean local = p == Minecraft.getInstance().player;
+        boolean hasCheat = local && ClientCheatState.get() == Cheat.INVISIBLE;
+        if (hasCheat || p.isInvisible()) {
             e.setCanceled(true);
         }
     }
 
     // ------------------------------------------------------------------ AIM_LOCK
 
+    /**
+     * Mira diretamente numa hitbox viva por 60 ticks => trava a câmera no centro da hitbox
+     * até a entidade morrer ou passar de 25 blocos. Usa o mesmo LastLookTracker do NO_MISS.
+     */
     private static void tickAimLock(Minecraft mc) {
         LocalPlayer p = mc.player;
-        if (mc.screen != null || !p.isAlive() || p.isSpectator()) {
+        if (!p.isAlive() || p.isSpectator()) {
             resetAim();
             return;
         }
-        double fovHalf = Math.max(10.0D, mc.options.fov().get() / 2.0D);
-        double breakAngle = Math.min(15.0D, fovHalf);
+        if (mc.screen != null) return; // menu aberto: não mexe na câmera
 
-        // Já travado: continua mirando enquanto o alvo estiver perto do centro da mira.
+        LivingEntity looked = LOOK.update(p);
+
         if (aimLocked) {
-            if (aimTarget != null && isValidTarget(p, aimTarget) && angleTo(p, aimTarget) <= breakAngle) {
-                snapTo(p, aimTarget);
+            if (aimTarget == null || !aimTarget.isAlive() || p.distanceTo(aimTarget) > AIM_RELEASE_DISTANCE) {
+                resetAim(); // morreu ou ficou longe demais: libera
                 return;
             }
-            aimLocked = false; // o jogador desviou a mira: libera
-            aimTicks = 0;
+            lockOn(p, aimTarget);
+            return;
         }
 
-        LivingEntity candidate = null;
-        if (aimTarget != null && isValidTarget(p, aimTarget) && angleTo(p, aimTarget) <= fovHalf) {
-            candidate = aimTarget; // mantém o mesmo alvo enquanto ele estiver no FOV
-        } else {
-            double bestAngle = fovHalf;
-            for (LivingEntity le : mc.level.getEntitiesOfClass(LivingEntity.class,
-                    p.getBoundingBox().inflate(AIM_RANGE), x -> isValidTarget(p, x))) {
-                double a = angleTo(p, le);
-                if (a < bestAngle) {
-                    bestAngle = a;
-                    candidate = le;
-                }
-            }
-        }
-
-        if (candidate == null) {
+        if (looked == null || p.distanceTo(looked) > AIM_RELEASE_DISTANCE) {
             aimTarget = null;
             aimTicks = 0;
             return;
         }
-        if (candidate != aimTarget) {
-            aimTarget = candidate;
+        if (looked != aimTarget) {
+            aimTarget = looked;
             aimTicks = 0;
         } else if (++aimTicks >= AIM_TICKS_REQUIRED) {
             aimLocked = true;
-            snapTo(p, candidate);
+            lockOn(p, looked);
         }
     }
 
-    private static boolean isValidTarget(LocalPlayer p, LivingEntity e) {
-        return e != p && e.isAlive() && !e.isSpectator() && !(e instanceof ArmorStand)
-                && p.distanceToSqr(e) <= AIM_RANGE * AIM_RANGE && p.hasLineOfSight(e);
-    }
-
-    private static double angleTo(LocalPlayer p, LivingEntity e) {
-        Vec3 to = e.getBoundingBox().getCenter().subtract(p.getEyePosition()).normalize();
-        return Math.toDegrees(Math.acos(Mth.clamp(p.getLookAngle().dot(to), -1.0D, 1.0D)));
-    }
-
-    /** Rotaciona a câmera para o centro da hitbox (Entity#lookAt também zera a interpolação). */
-    private static void snapTo(LocalPlayer p, LivingEntity target) {
-        p.lookAt(EntityAnchorArgument.Anchor.EYES, target.getBoundingBox().getCenter());
+    /** Aponta a câmera para o centro da hitbox via setYRot/setXRot. */
+    private static void lockOn(LocalPlayer p, LivingEntity target) {
+        Vec3 d = target.getBoundingBox().getCenter().subtract(p.getEyePosition());
+        double horizontal = Math.sqrt(d.x * d.x + d.z * d.z);
+        float yaw = (float) (Mth.atan2(d.z, d.x) * (180.0D / Math.PI)) - 90.0F;
+        float pitch = (float) (-(Mth.atan2(d.y, horizontal) * (180.0D / Math.PI)));
+        p.setYRot(yaw);
+        p.setXRot(pitch);
+        p.setYHeadRot(yaw);
+        p.yRotO = yaw;
+        p.xRotO = pitch;
     }
 }

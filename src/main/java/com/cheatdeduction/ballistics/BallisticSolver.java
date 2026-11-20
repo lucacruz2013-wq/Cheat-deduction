@@ -1,42 +1,39 @@
 package com.cheatdeduction.ballistics;
 
+import com.cheatdeduction.tracking.LastLookTracker;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.LivingEntity;
-import net.minecraft.world.entity.decoration.ArmorStand;
 import net.minecraft.world.entity.projectile.AbstractArrow;
-import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 
 /**
- * NO_MISS: recalcula a velocidade inicial da flecha para acertar o alvo vivo mais próximo
- * na linha de visão, simulando exatamente a física vanilla de AbstractArrow:
- *   pos += v;  v *= 0.99;  v.y -= 0.05
- * A flecha continua seguindo a curva balística natural (só a velocidade inicial muda;
- * o módulo da velocidade original é preservado).
+ * NO_MISS: mira exclusivamente na última entidade olhada pelo atirador (LastLookTracker,
+ * últimos 100 ticks, ainda viva) e recalcula a velocidade inicial da flecha simulando a
+ * física vanilla de AbstractArrow:  pos += v;  v *= 0.99;  v.y -= 0.05.
+ * O módulo da velocidade original é preservado; a flecha segue a curva natural.
  */
 public final class BallisticSolver {
     public static final double GRAVITY = 0.05D;
     public static final double DRAG = 0.99D;
 
-    private static final double MAX_RANGE = 64.0D;
     private static final int MAX_TICKS = 300;
-    private static final double HIT_TOLERANCE = 0.6D;   // distância ao centro para considerar "acerto"
+    private static final double HIT_TOLERANCE = 0.6D;
     private static final double MAX_ACCEPTED_MISS = 2.0D;
-    private static final double CONE_DOT = 0.5D;        // alvo dentro de ~60° da direção original
 
     private BallisticSolver() {}
 
     private record Solution(Vec3 velocity, int ticks) {}
 
-    public static void aim(AbstractArrow arrow, LivingEntity shooter) {
+    public static void aim(AbstractArrow arrow, ServerPlayer shooter) {
         Vec3 v0 = arrow.getDeltaMovement();
         double speed = v0.length();
         if (speed < 0.1D) return;
 
-        Vec3 origin = arrow.position();
-        LivingEntity target = findTarget(arrow, shooter, origin, v0.normalize());
-        if (target == null) return;
+        LivingEntity target = LastLookTracker.server(shooter.getUUID()).getLast(shooter.level());
+        if (target == null || target == shooter) return; // sem alvo recente: tiro vanilla
 
+        Vec3 origin = arrow.position();
         double g = arrow.isNoGravity() ? 0.0D : GRAVITY;
         Vec3 targetMotion = new Vec3(target.getX() - target.xo,
                 target.onGround() ? 0.0D : target.getY() - target.yo,
@@ -44,7 +41,7 @@ public final class BallisticSolver {
 
         Vec3 aimPoint = target.getBoundingBox().getCenter();
         Solution best = null;
-        for (int i = 0; i < 3; i++) { // refinamento de antecipação (lead) do alvo
+        for (int i = 0; i < 3; i++) { // refina a antecipação do movimento do alvo
             Solution s = solve(origin, aimPoint, speed, g);
             if (s == null) break;
             best = s;
@@ -62,23 +59,6 @@ public final class BallisticSolver {
         arrow.xRotO = pitch;
     }
 
-    private static LivingEntity findTarget(AbstractArrow arrow, LivingEntity shooter, Vec3 origin, Vec3 dir) {
-        AABB area = arrow.getBoundingBox().inflate(MAX_RANGE);
-        LivingEntity best = null;
-        double bestDist = MAX_RANGE * MAX_RANGE;
-        for (LivingEntity e : arrow.level().getEntitiesOfClass(LivingEntity.class, area,
-                x -> x != shooter && x.isAlive() && !x.isSpectator() && !(x instanceof ArmorStand))) {
-            Vec3 to = e.getBoundingBox().getCenter().subtract(origin);
-            double d2 = to.lengthSqr();
-            if (d2 >= bestDist || d2 < 1.0E-4D) continue;
-            if (to.normalize().dot(dir) < CONE_DOT) continue;
-            if (!shooter.hasLineOfSight(e)) continue;
-            best = e;
-            bestDist = d2;
-        }
-        return best;
-    }
-
     /** Procura o ângulo de elevação cuja trajetória passa mais perto de {@code target}. */
     private static Solution solve(Vec3 origin, Vec3 target, double speed, double g) {
         double dx = target.x - origin.x;
@@ -87,7 +67,7 @@ public final class BallisticSolver {
         double hx = h > 1.0E-6D ? dx / h : 1.0D;
         double hz = h > 1.0E-6D ? dz / h : 0.0D;
 
-        // Varredura grossa: prefere a trajetória TENSA (menor tempo de voo) que acerta.
+        // Varredura grossa: prefere a trajetória tensa (menor tempo de voo) que acerta.
         double bestPitch = 0.0D;
         double bestScore = Double.MAX_VALUE;
         for (double pitch = -85.0D; pitch <= 85.0D; pitch += 0.25D) {
@@ -99,7 +79,7 @@ public final class BallisticSolver {
             }
         }
 
-        // Refinamento fino dentro do mesmo ramo (minimiza a distância ao centro).
+        // Refinamento fino no mesmo ramo (minimiza a distância ao centro da hitbox).
         double refinedPitch = bestPitch;
         double bestDist = Double.MAX_VALUE;
         int bestTicks = 0;
@@ -111,12 +91,11 @@ public final class BallisticSolver {
                 bestTicks = (int) r[1];
             }
         }
-        if (bestDist > MAX_ACCEPTED_MISS) return null; // fora de alcance: mantém o tiro vanilla
+        if (bestDist > MAX_ACCEPTED_MISS) return null; // fora de alcance: tiro vanilla
 
         double pr = Math.toRadians(refinedPitch);
         double c = Math.cos(pr);
-        Vec3 vel = new Vec3(hx * c * speed, Math.sin(pr) * speed, hz * c * speed);
-        return new Solution(vel, bestTicks);
+        return new Solution(new Vec3(hx * c * speed, Math.sin(pr) * speed, hz * c * speed), bestTicks);
     }
 
     /** @return {menor distância da trajetória ao ponto, tick em que ocorreu}. */
