@@ -1,0 +1,26 @@
+modLoader="javafml"
+loaderVersion="[47,)"
+license="MIT"
+
+[[mods]]
+modId="cheatdeduction"
+version="1.0.0"
+displayName="Cheat Deduction"
+description='''
+Jogo de dedução: cada jogador recebe um cheat secreto. Descubra quem usa qual cheat,
+ganhe pontos e mate o Ender Dragon. Funciona em singleplayer, LAN e servidor (mod necessário nos dois lados).
+'''
+
+[[dependencies.cheatdeduction]]
+modId="forge"
+mandatory=true
+versionRange="[47,)"
+ordering="NONE"
+side="BOTH"
+
+[[dependencies.cheatdeduction]]
+modId="minecraft"
+mandatory=true
+versionRange="[1.20.1,1.21)"
+ordering="NONE"
+side="BOTH"
