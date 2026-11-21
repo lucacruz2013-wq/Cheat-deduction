@@ -2,6 +2,7 @@ package com.cheatdeduction.client;
 
 import com.cheatdeduction.Cheat;
 import com.cheatdeduction.CheatDeductionMod;
+import com.cheatdeduction.network.ModNetwork;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
@@ -41,6 +42,8 @@ public final class ClientEvents {
     private static final double AIM_SCREEN_FOV_DOT = 0.45D;
     private static final int AIM_TICKS_REQUIRED = 50;
     private static final int AIM_LOCK_DURATION = 70;
+    private static final double BASE_FPS = 120.0D;
+    private static final float SMOOTH_STEP_AT_120FPS = 0.22F;
 
     private record OreBox(BlockPos pos, float r, float g, float b) {}
 
@@ -51,6 +54,8 @@ public final class ClientEvents {
     private static LivingEntity aimTarget;
     private static int aimTicks;
     private static int lockRemaining;
+    private static boolean serverNotifiedLocked;
+    private static long lastFrameNanos;
 
     private static int fallHurtSuppress;
 
@@ -97,10 +102,41 @@ public final class ClientEvents {
         }
     }
 
+    @SubscribeEvent
+    public static void onRenderTick(TickEvent.RenderTickEvent e) {
+        if (e.phase != TickEvent.Phase.START) return;
+
+        long now = System.nanoTime();
+        double dtSeconds = (lastFrameNanos == 0L) ? (1.0D / BASE_FPS) : (now - lastFrameNanos) / 1_000_000_000.0D;
+        lastFrameNanos = now;
+        dtSeconds = Mth.clamp(dtSeconds, 0.0005D, 0.05D);
+
+        Minecraft mc = Minecraft.getInstance();
+        LocalPlayer p = mc.player;
+        if (p == null || mc.level == null || mc.isPaused() || mc.screen != null) return;
+        if (ClientCheatState.get() != Cheat.AIM_LOCK || lockRemaining <= 0 || aimTarget == null || !aimTarget.isAlive()) {
+            return;
+        }
+
+        // Normaliza a suavização para uma base fixa de 120 FPS (idêntico em 60Hz, 144Hz ou 165Hz)
+        float alpha = (float) (1.0D - Math.pow(1.0D - SMOOTH_STEP_AT_120FPS, dtSeconds * BASE_FPS));
+        smoothLockOn(p, aimTarget, e.renderTickTime, Mth.clamp(alpha, 0.02F, 1.0F));
+    }
+
+    private static void setLockedState(boolean locked) {
+        if (serverNotifiedLocked != locked) {
+            serverNotifiedLocked = locked;
+            if (Minecraft.getInstance().getConnection() != null) {
+                ModNetwork.sendAimLockState(locked);
+            }
+        }
+    }
+
     private static void resetAim() {
         aimTarget = null;
         aimTicks = 0;
         lockRemaining = 0;
+        setLockedState(false);
     }
 
     private static void resetAll() {
@@ -108,6 +144,7 @@ public final class ClientEvents {
         miningOn = false;
         ores = List.of();
         fallHurtSuppress = 0;
+        lastFrameNanos = 0L;
     }
 
     @SubscribeEvent
@@ -139,7 +176,7 @@ public final class ClientEvents {
                     if (st.isAir()) continue;
                     if (st.is(Tags.Blocks.ORES)) {
                         float[] col = colorFor(st);
-                        found.add(new OreBox(m.immutable(), col[0], col[1], col[2]));
+                        found.add(new OreBox(m.immutable(), col, col, col));
                     }
                 }
             }
@@ -209,6 +246,7 @@ public final class ClientEvents {
         if (mc.screen != null) return;
 
         if (lockRemaining <= 0) {
+            setLockedState(false);
             LivingEntity bestOnScreen = findBestOnScreen(p);
             if (bestOnScreen == null) {
                 aimTarget = null;
@@ -217,9 +255,10 @@ public final class ClientEvents {
             }
 
             aimTarget = bestOnScreen;
-            if (++aimTicks < AIM_TICKS_REQUIRED) return;
+                       if (++aimTicks < AIM_TICKS_REQUIRED) return;
 
             lockRemaining = AIM_LOCK_DURATION;
+            setLockedState(true);
         }
 
         if (aimTarget == null || !aimTarget.isAlive() || aimTarget.distanceTo(p) > AIM_RANGE + 5.0D) {
@@ -227,7 +266,7 @@ public final class ClientEvents {
             return;
         }
 
-        lockOn(p, aimTarget);
+        setLockedState(true);
         if (--lockRemaining <= 0) resetAim();
     }
 
@@ -251,15 +290,24 @@ public final class ClientEvents {
         .orElse(null);
     }
 
-       private static void lockOn(LocalPlayer p, LivingEntity target) {
-        Vec3 d = target.getBoundingBox().getCenter().subtract(p.getEyePosition());
+    private static void smoothLockOn(LocalPlayer p, LivingEntity target, float partialTick, float alpha) {
+        Vec3 eye = p.getEyePosition(partialTick);
+        Vec3 targetCenter = target.getPosition(partialTick).add(0.0D, target.getBbHeight() * 0.5D, 0.0D);
+        Vec3 d = targetCenter.subtract(eye);
         double horizontal = Math.sqrt(d.x * d.x + d.z * d.z);
-        float yaw = (float) (Mth.atan2(d.z, d.x) * (180.0D / Math.PI)) - 90.0F;
-        float pitch = (float) (-(Mth.atan2(d.y, horizontal) * (180.0D / Math.PI)));
-        p.setYRot(yaw);
-        p.setXRot(Mth.clamp(pitch, -90.0F, 90.0F));
-        p.setYHeadRot(yaw);
-        p.yRotO = yaw;
-        p.xRotO = p.getXRot();
+
+        float targetYaw = (float) (Mth.atan2(d.z, d.x) * (180.0D / Math.PI)) - 90.0F;
+        float targetPitch = Mth.clamp((float) (-(Mth.atan2(d.y, horizontal) * (180.0D / Math.PI))), -90.0F, 90.0F);
+
+        float newYaw = Mth.rotLerp(alpha, p.getYRot(), targetYaw);
+        float newPitch = Mth.lerp(alpha, p.getXRot(), targetPitch);
+
+        p.setYRot(newYaw);
+        p.setXRot(newPitch);
+        p.setYHeadRot(newYaw);
+        p.yRotO = newYaw;
+        p.xRotO = newPitch;
     }
 }
+
+
