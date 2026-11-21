@@ -235,16 +235,13 @@ public final class ClientEvents {
         return localWithCheat || p.isInvisible();
     }
 
-    @SubscribeEvent
+      @SubscribeEvent
     public static void onRenderPlayer(RenderPlayerEvent.Pre e) {
-        Player p = e.getEntity();
-        if (isStealthInvisible(p)) {
-            e.getRenderer().shadowRadius = 0.0F;
+        if (isStealthInvisible(e.getEntity())) {
             e.setCanceled(true);
-        } else {
-            e.getRenderer().shadowRadius = 0.5F;
         }
     }
+
 
     @SubscribeEvent
     public static void onRenderNameTag(RenderNameTagEvent e) {
