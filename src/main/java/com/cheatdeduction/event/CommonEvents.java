@@ -5,18 +5,24 @@ import com.cheatdeduction.CheatDeductionMod;
 import com.cheatdeduction.ballistics.BallisticSolver;
 import com.cheatdeduction.game.GameManager;
 import com.cheatdeduction.tracking.LastLookTracker;
+import com.mojang.datafixers.util.Pair;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import net.minecraft.network.protocol.game.ClientboundSetEquipmentPacket;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.tags.DamageTypeTags;
 import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.damagesource.DamageTypes;
 import net.minecraft.world.effect.MobEffectInstance;
 import net.minecraft.world.effect.MobEffects;
+import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.ai.Brain;
 import net.minecraft.world.entity.ai.attributes.AttributeInstance;
@@ -27,6 +33,7 @@ import net.minecraft.world.entity.boss.enderdragon.EnderDragon;
 import net.minecraft.world.entity.player.Abilities;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.entity.projectile.AbstractArrow;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.phys.AABB;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.entity.EntityJoinLevelEvent;
@@ -49,6 +56,7 @@ public final class CommonEvents {
     private static final Map<UUID, Float> FLY_FALL_DIST = new HashMap<>();
     private static final Set<UUID> FLY_FROM_FLIGHT = new HashSet<>();
     private static final Set<UUID> AIM_LOCKED_PLAYERS = new HashSet<>();
+    private static final Set<UUID> HIDDEN_EQUIP_PLAYERS = new HashSet<>();
 
     private CommonEvents() {}
 
@@ -92,9 +100,13 @@ public final class CommonEvents {
             if (p.isCrouching()) {
                 p.addEffect(new MobEffectInstance(MobEffects.INVISIBILITY, 5, 0, false, false, false));
                 blindMobs(p);
+                syncHiddenEquipment(p, true);
             } else {
                 p.removeEffect(MobEffects.INVISIBILITY);
+                syncHiddenEquipment(p, false);
             }
+        } else if (HIDDEN_EQUIP_PLAYERS.contains(p.getUUID())) {
+            syncHiddenEquipment(p, false);
         }
 
         if (!p.isCreative() && !p.isSpectator()) {
@@ -161,13 +173,38 @@ public final class CommonEvents {
         }
     }
 
+    private static void syncHiddenEquipment(ServerPlayer p, boolean hide) {
+        UUID id = p.getUUID();
+        if (hide) {
+            HIDDEN_EQUIP_PLAYERS.add(id);
+        } else if (!HIDDEN_EQUIP_PLAYERS.remove(id)) {
+            return;
+        }
+
+        List<Pair<EquipmentSlot, ItemStack>> slots = new ArrayList<>();
+        for (EquipmentSlot slot : EquipmentSlot.values()) {
+            slots.add(Pair.of(slot, hide ? ItemStack.EMPTY : p.getItemBySlot(slot).copy()));
+        }
+
+        ClientboundSetEquipmentPacket packet = new ClientboundSetEquipmentPacket(p.getId(), slots);
+        ServerLevel level = p.serverLevel();
+        for (ServerPlayer other : level.players()) {
+            if (other != p && other.distanceToSqr(p) < 16384.0D) {
+                other.connection.send(packet);
+            }
+        }
+    }
+
     public static void removeEffects(ServerPlayer p, Cheat old) {
         switch (old) {
             case SPEED -> {
                 AttributeInstance a = p.getAttribute(Attributes.MOVEMENT_SPEED);
                 if (a != null) a.removeModifier(SPEED_ID);
             }
-            case INVISIBLE -> p.removeEffect(MobEffects.INVISIBILITY);
+            case INVISIBLE -> {
+                p.removeEffect(MobEffects.INVISIBILITY);
+                syncHiddenEquipment(p, false);
+            }
             case FLY -> {
                 FLY_FALL_DIST.remove(p.getUUID());
                 FLY_FROM_FLIGHT.remove(p.getUUID());
@@ -237,7 +274,7 @@ public final class CommonEvents {
 
     @SubscribeEvent
     public static void onEntityJoin(EntityJoinLevelEvent e) {
-               if (e.getLevel().isClientSide() || !(e.getEntity() instanceof AbstractArrow arrow)) return;
+        if (e.getLevel().isClientSide() || !(e.getEntity() instanceof AbstractArrow arrow)) return;
         if (!(arrow.getOwner() instanceof ServerPlayer shooter)) return;
         if (GameManager.getCheat(shooter.getUUID()) != Cheat.NO_MISS) return;
         if (arrow.getPersistentData().getBoolean(NOMISS_TAG)) return;
@@ -262,6 +299,7 @@ public final class CommonEvents {
     public static void onLogout(PlayerEvent.PlayerLoggedOutEvent e) {
         if (e.getEntity() instanceof ServerPlayer p) {
             AIM_LOCKED_PLAYERS.remove(p.getUUID());
+            HIDDEN_EQUIP_PLAYERS.remove(p.getUUID());
             LastLookTracker.removeServer(p.getUUID());
             GameManager.onLogout(p);
         }
@@ -270,8 +308,8 @@ public final class CommonEvents {
     @SubscribeEvent
     public static void onServerStopped(ServerStoppedEvent e) {
         AIM_LOCKED_PLAYERS.clear();
+        HIDDEN_EQUIP_PLAYERS.clear();
         LastLookTracker.clearServer();
         GameManager.reset();
     }
 }
-
