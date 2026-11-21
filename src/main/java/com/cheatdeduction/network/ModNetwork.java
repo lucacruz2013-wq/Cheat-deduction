@@ -30,6 +30,9 @@ public final class ModNetwork {
         CHANNEL.messageBuilder(VotePacket.class, id++, NetworkDirection.PLAY_TO_SERVER)
                 .encoder(VotePacket::encode).decoder(VotePacket::decode)
                 .consumerMainThread(VotePacket::handle).add();
+        CHANNEL.messageBuilder(AimLockStatePacket.class, id++, NetworkDirection.PLAY_TO_SERVER)
+                .encoder(AimLockStatePacket::encode).decoder(AimLockStatePacket::decode)
+                .consumerMainThread(AimLockStatePacket::handle).add();
     }
 
     /** Servidor -> cliente: cheat atual do jogador (null = nenhum). */
@@ -41,5 +44,10 @@ public final class ModNetwork {
     /** Servidor -> cliente: abre/fecha a VotingScreen. */
     public static void sendVoting(ServerPlayer player, VotingPacket packet) {
         CHANNEL.send(PacketDistributor.PLAYER.with(() -> player), packet);
+    }
+
+    /** Cliente -> servidor: avisa quando a trava do Aimlock ativa ou desativa. */
+    public static void sendAimLockState(boolean locked) {
+        CHANNEL.sendToServer(new AimLockStatePacket(locked));
     }
 }
