@@ -37,11 +37,10 @@ public final class ClientEvents {
     private static final int ORE_RADIUS = 32;
     private static final int SCAN_INTERVAL_TICKS = 20;
 
-    private static final double AIM_RANGE = 25.0D;
-    private static final double AIM_CONE_DOT = 0.88D;
-    private static final int AIM_TICKS_REQUIRED = 60;
-    private static final int AIM_LOCK_DURATION = 40;
-    private static final int AIM_GRACE_MAX = 10;
+    private static final double AIM_RANGE = 30.0D;
+    private static final double AIM_SCREEN_FOV_DOT = 0.45D;
+    private static final int AIM_TICKS_REQUIRED = 50;
+    private static final int AIM_LOCK_DURATION = 70;
 
     private record OreBox(BlockPos pos, float r, float g, float b) {}
 
@@ -51,7 +50,6 @@ public final class ClientEvents {
 
     private static LivingEntity aimTarget;
     private static int aimTicks;
-    private static int aimGraceTicks;
     private static int lockRemaining;
 
     private static int fallHurtSuppress;
@@ -102,7 +100,6 @@ public final class ClientEvents {
     private static void resetAim() {
         aimTarget = null;
         aimTicks = 0;
-        aimGraceTicks = 0;
         lockRemaining = 0;
     }
 
@@ -212,25 +209,16 @@ public final class ClientEvents {
         if (mc.screen != null) return;
 
         if (lockRemaining <= 0) {
-            LivingEntity looked = lookedEntity(p);
-            if (looked == null) {
-                if (aimTarget != null && ++aimGraceTicks <= AIM_GRACE_MAX) {
-                    return;
-                }
+            LivingEntity bestOnScreen = findBestOnScreen(p);
+            if (bestOnScreen == null) {
                 aimTarget = null;
                 aimTicks = 0;
-                aimGraceTicks = 0;
                 return;
             }
 
-            aimGraceTicks = 0;
-            if (looked != aimTarget) {
-                aimTarget = looked;
-                aimTicks = 1;
-                return;
-            }
-
+            aimTarget = bestOnScreen;
             if (++aimTicks < AIM_TICKS_REQUIRED) return;
+
             lockRemaining = AIM_LOCK_DURATION;
         }
 
@@ -243,10 +231,10 @@ public final class ClientEvents {
         if (--lockRemaining <= 0) resetAim();
     }
 
-    private static LivingEntity lookedEntity(LocalPlayer p) {
+    private static LivingEntity findBestOnScreen(LocalPlayer p) {
         Vec3 eye = p.getEyePosition();
         Vec3 look = p.getViewVector(1.0F).normalize();
-        AABB box = p.getBoundingBox().expandTowards(look.scale(AIM_RANGE)).inflate(6.0D);
+        AABB box = p.getBoundingBox().inflate(AIM_RANGE);
 
         return p.level().getEntitiesOfClass(LivingEntity.class, box, e ->
                 e != p && e.isAlive() && !e.isSpectator() && !(e instanceof ArmorStand)
@@ -254,16 +242,16 @@ public final class ClientEvents {
         ).stream()
         .filter(e -> {
             Vec3 toCenter = e.getBoundingBox().getCenter().subtract(eye).normalize();
-            return look.dot(toCenter) >= AIM_CONE_DOT;
+            return look.dot(toCenter) >= AIM_SCREEN_FOV_DOT;
         })
         .min(Comparator.comparingDouble(e -> {
             Vec3 toCenter = e.getBoundingBox().getCenter().subtract(eye).normalize();
             return 1.0D - look.dot(toCenter);
         }))
-            .orElse(null);
+        .orElse(null);
     }
 
-    private static void lockOn(LocalPlayer p, LivingEntity target) {
+       private static void lockOn(LocalPlayer p, LivingEntity target) {
         Vec3 d = target.getBoundingBox().getCenter().subtract(p.getEyePosition());
         double horizontal = Math.sqrt(d.x * d.x + d.z * d.z);
         float yaw = (float) (Mth.atan2(d.z, d.x) * (180.0D / Math.PI)) - 90.0F;
@@ -275,4 +263,3 @@ public final class ClientEvents {
         p.xRotO = p.getXRot();
     }
 }
-    
