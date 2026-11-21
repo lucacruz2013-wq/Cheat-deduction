@@ -6,7 +6,9 @@ import com.cheatdeduction.ballistics.BallisticSolver;
 import com.cheatdeduction.game.GameManager;
 import com.cheatdeduction.tracking.LastLookTracker;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
@@ -45,6 +47,7 @@ public final class CommonEvents {
     private static final String NOMISS_TAG = "cheatdeduction_nomiss_done";
     private static final double MOB_SWEEP_RADIUS = 32.0D;
     private static final Map<UUID, Float> FLY_FALL_DIST = new HashMap<>();
+    private static final Set<UUID> FLY_FROM_FLIGHT = new HashSet<>();
 
     private CommonEvents() {}
 
@@ -84,7 +87,7 @@ public final class CommonEvents {
         if (!p.isCreative() && !p.isSpectator()) {
             Abilities ab = p.getAbilities();
             boolean wantFly = (cheat == Cheat.FLY);
-            float targetFlySpeed = wantFly ? 0.022F : 0.05F;
+            float targetFlySpeed = wantFly ? 0.0253F : 0.05F;
             if (ab.mayfly != wantFly || ab.getFlyingSpeed() != targetFlySpeed) {
                 ab.mayfly = wantFly;
                 if (!wantFly) ab.flying = false;
@@ -94,8 +97,12 @@ public final class CommonEvents {
 
             if (wantFly) {
                 UUID id = p.getUUID();
-                if (ab.flying || p.isInWater() || p.isInLava() || p.onClimbable()) {
+                if (ab.flying) {
                     FLY_FALL_DIST.remove(id);
+                    FLY_FROM_FLIGHT.add(id);
+                } else if (p.isInWater() || p.isInLava() || p.onClimbable()) {
+                    FLY_FALL_DIST.remove(id);
+                    FLY_FROM_FLIGHT.remove(id);
                 } else if (!p.onGround()) {
                     double dy = p.getDeltaMovement().y;
                     if (dy < 0.0D) {
@@ -103,12 +110,15 @@ public final class CommonEvents {
                     }
                 } else {
                     Float fallen = FLY_FALL_DIST.remove(id);
+                    boolean afterFlight = FLY_FROM_FLIGHT.remove(id);
                     if (fallen != null && fallen > 3.0F) {
-                        p.hurt(p.damageSources().fall(), fallen - 3.0F);
+                        float mult = afterFlight ? 0.5F : 1.0F;
+                        p.hurt(p.damageSources().fall(), (fallen - 3.0F) * mult);
                     }
                 }
             } else {
                 FLY_FALL_DIST.remove(p.getUUID());
+                FLY_FROM_FLIGHT.remove(p.getUUID());
             }
         }
 
@@ -147,6 +157,7 @@ public final class CommonEvents {
             case INVISIBLE -> p.removeEffect(MobEffects.INVISIBILITY);
             case FLY -> {
                 FLY_FALL_DIST.remove(p.getUUID());
+                FLY_FROM_FLIGHT.remove(p.getUUID());
                 if (!p.isCreative() && !p.isSpectator()) {
                     Abilities ab = p.getAbilities();
                     ab.mayfly = false;
@@ -223,7 +234,7 @@ public final class CommonEvents {
         }
     }
 
-    @SubscribeEvent
+       @SubscribeEvent
     public static void onLogin(PlayerEvent.PlayerLoggedInEvent e) {
         if (e.getEntity() instanceof ServerPlayer p) GameManager.onLogin(p);
     }
@@ -242,3 +253,4 @@ public final class CommonEvents {
         GameManager.reset();
     }
 }
+
