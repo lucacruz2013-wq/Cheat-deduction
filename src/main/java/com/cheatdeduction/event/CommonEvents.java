@@ -59,18 +59,19 @@ public final class CommonEvents {
         if (e.phase != TickEvent.Phase.END || !(e.player instanceof ServerPlayer p)) return;
         Cheat cheat = GameManager.getCheat(p.getUUID());
 
-        // SPEED: +22% (MULTIPLY_TOTAL) apenas enquanto correndo
+          // SPEED: +18% (MULTIPLY_TOTAL) apenas enquanto correndo
         AttributeInstance speed = p.getAttribute(Attributes.MOVEMENT_SPEED);
         if (speed != null) {
             boolean want = cheat == Cheat.SPEED && p.isSprinting();
             boolean has = speed.getModifier(SPEED_ID) != null;
             if (want && !has) {
                 speed.addTransientModifier(new AttributeModifier(SPEED_ID, "cheatdeduction_speed",
-                        0.22D, AttributeModifier.Operation.MULTIPLY_TOTAL));
+                        0.18D, AttributeModifier.Operation.MULTIPLY_TOTAL));
             } else if (!want && has) {
                 speed.removeModifier(SPEED_ID);
             }
         }
+
 
         // INVISIBLE: invisível enquanto agachado + mobs próximos esquecem o jogador
         if (cheat == Cheat.INVISIBLE) {
