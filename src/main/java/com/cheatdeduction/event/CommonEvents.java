@@ -5,18 +5,21 @@ import com.cheatdeduction.CheatDeductionMod;
 import com.cheatdeduction.ballistics.BallisticSolver;
 import com.cheatdeduction.game.GameManager;
 import com.cheatdeduction.tracking.LastLookTracker;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.UUID;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.tags.DamageTypeTags;
 import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.damagesource.DamageTypes;
+import net.minecraft.world.effect.MobEffectInstance;
 import net.minecraft.world.effect.MobEffects;
 import net.minecraft.world.entity.Mob;
+import net.minecraft.world.entity.ai.Brain;
 import net.minecraft.world.entity.ai.attributes.AttributeInstance;
 import net.minecraft.world.entity.ai.attributes.AttributeModifier;
 import net.minecraft.world.entity.ai.attributes.Attributes;
-import net.minecraft.world.entity.ai.Brain;
 import net.minecraft.world.entity.ai.memory.MemoryModuleType;
 import net.minecraft.world.entity.boss.enderdragon.EnderDragon;
 import net.minecraft.world.entity.player.Abilities;
@@ -27,8 +30,8 @@ import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.entity.EntityJoinLevelEvent;
 import net.minecraftforge.event.entity.living.LivingAttackEvent;
 import net.minecraftforge.event.entity.living.LivingChangeTargetEvent;
-import net.minecraftforge.event.entity.living.LivingFallEvent;
 import net.minecraftforge.event.entity.living.LivingDeathEvent;
+import net.minecraftforge.event.entity.living.LivingFallEvent;
 import net.minecraftforge.event.entity.living.LivingHurtEvent;
 import net.minecraftforge.event.entity.player.PlayerEvent;
 import net.minecraftforge.event.server.ServerStoppedEvent;
@@ -36,16 +39,14 @@ import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.server.ServerLifecycleHooks;
 
-/** Lógica de servidor dos cheats (roda também no servidor integrado). */
 @Mod.EventBusSubscriber(modid = CheatDeductionMod.MODID)
 public final class CommonEvents {
     private static final UUID SPEED_ID = UUID.fromString("7d1c3f0e-6a52-4a2f-9a43-5c1d2e8b9a10");
     private static final String NOMISS_TAG = "cheatdeduction_nomiss_done";
     private static final double MOB_SWEEP_RADIUS = 32.0D;
+    private static final Map<UUID, Float> FLY_FALL_DIST = new HashMap<>();
 
     private CommonEvents() {}
-
-    // ------------------------------------------------------------ tick
 
     @SubscribeEvent
     public static void onServerTick(TickEvent.ServerTickEvent e) {
@@ -59,7 +60,6 @@ public final class CommonEvents {
         if (e.phase != TickEvent.Phase.END || !(e.player instanceof ServerPlayer p)) return;
         Cheat cheat = GameManager.getCheat(p.getUUID());
 
-          // SPEED: +18% (MULTIPLY_TOTAL) apenas enquanto correndo
         AttributeInstance speed = p.getAttribute(Attributes.MOVEMENT_SPEED);
         if (speed != null) {
             boolean want = cheat == Cheat.SPEED && p.isSprinting();
@@ -72,36 +72,51 @@ public final class CommonEvents {
             }
         }
 
-
-        // INVISIBLE: invisível enquanto agachado + mobs próximos esquecem o jogador
         if (cheat == Cheat.INVISIBLE) {
-            boolean crouching = p.isCrouching();
-            if (p.isInvisible() != crouching && !p.hasEffect(MobEffects.INVISIBILITY)) {
-                p.setInvisible(crouching);
+            if (p.isCrouching()) {
+                p.addEffect(new MobEffectInstance(MobEffects.INVISIBILITY, 5, 0, false, false, false));
+                blindMobs(p);
+            } else {
+                p.removeEffect(MobEffects.INVISIBILITY);
             }
-            if (crouching) blindMobs(p);
         }
 
-        // FLY: mayfly no survival
-        if (cheat == Cheat.FLY && !p.isCreative() && !p.isSpectator()) {
+        if (!p.isCreative() && !p.isSpectator()) {
             Abilities ab = p.getAbilities();
-            if (!ab.mayfly) {
-                ab.mayfly = true;
+            boolean wantFly = (cheat == Cheat.FLY);
+            float targetFlySpeed = wantFly ? 0.022F : 0.05F;
+            if (ab.mayfly != wantFly || ab.getFlyingSpeed() != targetFlySpeed) {
+                ab.mayfly = wantFly;
+                if (!wantFly) ab.flying = false;
+                ab.setFlyingSpeed(targetFlySpeed);
                 p.onUpdateAbilities();
             }
+
+            if (wantFly) {
+                UUID id = p.getUUID();
+                if (ab.flying || p.isInWater() || p.isInLava() || p.onClimbable()) {
+                    FLY_FALL_DIST.remove(id);
+                } else if (!p.onGround()) {
+                    double dy = p.getDeltaMovement().y;
+                    if (dy < 0.0D) {
+                        FLY_FALL_DIST.merge(id, (float) (-dy), Float::sum);
+                    }
+                } else {
+                    Float fallen = FLY_FALL_DIST.remove(id);
+                    if (fallen != null && fallen > 3.0F) {
+                        p.hurt(p.damageSources().fall(), fallen - 3.0F);
+                    }
+                }
+            } else {
+                FLY_FALL_DIST.remove(p.getUUID());
+            }
         }
 
-        // NO_MISS: registra a última entidade olhada (raio de 40 blocos, memória de 100 ticks)
         if (cheat == Cheat.NO_MISS) {
             LastLookTracker.server(p.getUUID()).update(p);
         }
     }
 
-    /**
-     * Mobs a 32 blocos que miram o jogador agachado esquecem dele usando APENAS
-     * setTarget(null), setLastHurtByMob(null) e getNavigation().stop(). O Brain só é tocado dentro
-     * de try-catch e apenas MemoryModuleType.ATTACK_TARGET (após hasMemoryValue).
-     */
     private static void blindMobs(ServerPlayer p) {
         AABB area = p.getBoundingBox().inflate(MOB_SWEEP_RADIUS);
         double maxSqr = MOB_SWEEP_RADIUS * MOB_SWEEP_RADIUS;
@@ -114,7 +129,6 @@ public final class CommonEvents {
                     if (brainTarget) brain.eraseMemory(MemoryModuleType.ATTACK_TARGET);
                 }
             } catch (Exception ignored) {
-                // mobs sem Brain utilizável: ignora
             }
             if (brainTarget || mob.getTarget() == p || mob.getLastHurtByMob() == p) {
                 mob.setTarget(null);
@@ -124,21 +138,20 @@ public final class CommonEvents {
         }
     }
 
-    /** Desfaz o efeito de um cheat quando ele é removido/trocado. */
     public static void removeEffects(ServerPlayer p, Cheat old) {
         switch (old) {
             case SPEED -> {
                 AttributeInstance a = p.getAttribute(Attributes.MOVEMENT_SPEED);
                 if (a != null) a.removeModifier(SPEED_ID);
             }
-            case INVISIBLE -> {
-                if (!p.hasEffect(MobEffects.INVISIBILITY)) p.setInvisible(false);
-            }
+            case INVISIBLE -> p.removeEffect(MobEffects.INVISIBILITY);
             case FLY -> {
+                FLY_FALL_DIST.remove(p.getUUID());
                 if (!p.isCreative() && !p.isSpectator()) {
                     Abilities ab = p.getAbilities();
                     ab.mayfly = false;
                     ab.flying = false;
+                    ab.setFlyingSpeed(0.05F);
                     p.onUpdateAbilities();
                 }
             }
@@ -147,9 +160,6 @@ public final class CommonEvents {
         }
     }
 
-    // ------------------------------------------------------------ FALLDAMAGE (sem dano, sem tremor)
-
-    /** Cancela antes de LivingEntity#hurt: sem dano, sem animação de hurt e sem tilt de câmera. */
     @SubscribeEvent
     public static void onAttack(LivingAttackEvent e) {
         if (e.getEntity() instanceof ServerPlayer p
@@ -159,7 +169,6 @@ public final class CommonEvents {
         }
     }
 
-    /** Cancela o cálculo de dano de queda (evita também o som de impacto e o hurt). */
     @SubscribeEvent
     public static void onFall(LivingFallEvent e) {
         if (e.getEntity() instanceof ServerPlayer p
@@ -167,8 +176,6 @@ public final class CommonEvents {
             e.setCanceled(true);
         }
     }
-
-    // ------------------------------------------------------------ FALLDAMAGE (fallback) / KILLBOT
 
     @SubscribeEvent
     public static void onHurt(LivingHurtEvent e) {
@@ -181,7 +188,6 @@ public final class CommonEvents {
             return;
         }
 
-        // KILLBOT (nerf): sem instakill por projéteis e nunca em outros jogadores
         if (source.getEntity() instanceof ServerPlayer attacker
                 && GameManager.getCheat(attacker.getUUID()) == Cheat.KILLBOT
                 && !source.is(DamageTypeTags.IS_PROJECTILE)
@@ -189,8 +195,6 @@ public final class CommonEvents {
             e.setAmount(Float.MAX_VALUE);
         }
     }
-
-    // ------------------------------------------------------------ INVISIBLE (alvos de mobs)
 
     @SubscribeEvent
     public static void onChangeTarget(LivingChangeTargetEvent e) {
@@ -200,8 +204,6 @@ public final class CommonEvents {
             e.setCanceled(true);
         }
     }
-
-    // ------------------------------------------------------------ NO_MISS
 
     @SubscribeEvent
     public static void onEntityJoin(EntityJoinLevelEvent e) {
@@ -213,8 +215,6 @@ public final class CommonEvents {
         BallisticSolver.aim(arrow, shooter);
     }
 
-    // ------------------------------------------------------------ fim de partida
-
     @SubscribeEvent
     public static void onDeath(LivingDeathEvent e) {
         if (e.getEntity() instanceof EnderDragon dragon && !dragon.level().isClientSide) {
@@ -222,8 +222,6 @@ public final class CommonEvents {
             if (server != null) GameManager.onDragonDeath(server);
         }
     }
-
-    // ------------------------------------------------------------ conexão
 
     @SubscribeEvent
     public static void onLogin(PlayerEvent.PlayerLoggedInEvent e) {
