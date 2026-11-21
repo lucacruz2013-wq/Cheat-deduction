@@ -1,5 +1,7 @@
 package com.cheatdeduction.client;
 
+import net.minecraftforge.client.event.RenderNameTagEvent;
+import net.minecraftforge.eventbus.api.Event;
 import com.cheatdeduction.Cheat;
 import com.cheatdeduction.CheatDeductionMod;
 import com.cheatdeduction.network.ModNetwork;
@@ -227,13 +229,27 @@ public final class ClientEvents {
         }
     }
 
+       private static boolean isStealthInvisible(Player p) {
+        if (p.isSpectator() || !p.isCrouching()) return false;
+        boolean localWithCheat = p == Minecraft.getInstance().player && ClientCheatState.get() == Cheat.INVISIBLE;
+        return localWithCheat || p.isInvisible();
+    }
+
     @SubscribeEvent
     public static void onRenderPlayer(RenderPlayerEvent.Pre e) {
         Player p = e.getEntity();
-        if (p.isSpectator() || !p.isCrouching()) return;
-        boolean localWithCheat = p == Minecraft.getInstance().player && ClientCheatState.get() == Cheat.INVISIBLE;
-        if (localWithCheat || p.isInvisible()) {
+        if (isStealthInvisible(p)) {
+            e.getRenderer().shadowRadius = 0.0F;
             e.setCanceled(true);
+        } else {
+            e.getRenderer().shadowRadius = 0.5F;
+        }
+    }
+
+    @SubscribeEvent
+    public static void onRenderNameTag(RenderNameTagEvent e) {
+        if (e.getEntity() instanceof Player p && isStealthInvisible(p)) {
+            e.setResult(Event.Result.DENY);
         }
     }
 
