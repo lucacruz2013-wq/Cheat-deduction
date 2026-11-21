@@ -20,8 +20,8 @@ public final class BallisticSolver {
     private static final double MAX_RANGE = 64.0D;
     private static final double MAX_CONE_DEGREES = 50.0D;
     private static final int MAX_TICKS = 220;
-    private static final double HIT_TOLERANCE = 0.55D;
-    private static final double MAX_ACCEPTED_MISS = 1.6D;
+    private static final double HIT_TOLERANCE = 0.35D;
+    private static final double MAX_ACCEPTED_MISS = 1.2D;
 
     private BallisticSolver() {}
 
@@ -44,7 +44,7 @@ public final class BallisticSolver {
         );
 
         AABB box = target.getBoundingBox();
-        double[] heightRatios = new double[] { 0.65D, 0.90D, 0.50D, 0.30D };
+        double[] heightRatios = new double[] { 0.72D, 0.92D, 0.58D };
 
         for (double ratio : heightRatios) {
             Vec3 baseAim = new Vec3(
@@ -134,16 +134,22 @@ public final class BallisticSolver {
         double hz = h > 1.0E-6D ? dz / h : 0.0D;
 
         Level level = arrow.level();
-        AABB targetBox = targetEntity.getBoundingBox().inflate(0.2D);
+        AABB rawBox = targetEntity.getBoundingBox();
+        AABB upperHitbox = new AABB(
+                rawBox.minX, rawBox.minY + rawBox.getYsize() * 0.35D, rawBox.minZ,
+                rawBox.maxX, rawBox.maxY, rawBox.maxZ
+        );
 
         double bestPitch = Double.NaN;
         double bestScore = Double.MAX_VALUE;
 
         for (double pitch = -85.0D; pitch <= 85.0D; pitch += 0.5D) {
-            double[] r = simulateWithBlocks(level, arrow, origin, pitch, hx, hz, speed, g, targetPos, targetBox);
-            if (r == null) continue;
+            double[] sim = simulateWithBlocks(level, arrow, origin, pitch, hx, hz, speed, g, targetPos, upperHitbox);
+            if (sim == null) continue;
 
-            double score = r[0] <= HIT_TOLERANCE ? r[1] : 1000.0D + r[0];
+            double dist = sim[0];
+            double ticks = sim[1];
+            double score = dist <= HIT_TOLERANCE ? ticks : 1000.0D + dist;
             if (score < bestScore) {
                 bestScore = score;
                 bestPitch = pitch;
@@ -157,13 +163,15 @@ public final class BallisticSolver {
         int bestTicks = 0;
 
         for (double pitch = bestPitch - 0.5D; pitch <= bestPitch + 0.5D; pitch += 0.02D) {
-            double[] r = simulateWithBlocks(level, arrow, origin, pitch, hx, hz, speed, g, targetPos, targetBox);
-            if (r == null) continue;
+            double[] sim = simulateWithBlocks(level, arrow, origin, pitch, hx, hz, speed, g, targetPos, upperHitbox);
+            if (sim == null) continue;
 
-            if (r[0] < bestDist) {
-                bestDist = r[0];
+            double dist = sim[0];
+            int ticks = (int) sim[1];
+            if (dist < bestDist) {
+                bestDist = dist;
                 refinedPitch = pitch;
-                bestTicks = (int) r[1];
+                bestTicks = ticks;
             }
         }
 
@@ -176,7 +184,7 @@ public final class BallisticSolver {
 
     private static double[] simulateWithBlocks(Level level, AbstractArrow arrow, Vec3 origin,
                                                double pitchDeg, double hx, double hz,
-                                               double speed, double g, Vec3 targetPos, AABB targetBox) {
+                                               double speed, double g, Vec3 targetPos, AABB upperHitbox) {
         double pr = Math.toRadians(pitchDeg);
         double c = Math.cos(pr);
         double vx = hx * c * speed;
@@ -186,20 +194,29 @@ public final class BallisticSolver {
 
         double minDist = Double.MAX_VALUE;
         int minTick = 0;
+        Vec3 clearanceOffset = new Vec3(0.0D, -0.25D, 0.0D);
 
         for (int t = 1; t <= MAX_TICKS; t++) {
             double nx = px + vx, ny = py + vy, nz = pz + vz;
             Vec3 p0 = new Vec3(px, py, pz);
             Vec3 p1 = new Vec3(nx, ny, nz);
 
-            if (targetBox.clip(p0, p1).isPresent() || targetBox.contains(p1)) {
+            if (upperHitbox.clip(p0, p1).isPresent() || upperHitbox.contains(p1)) {
                 return new double[] { 0.0D, t };
             }
 
-            HitResult blockHit = level.clip(new ClipContext(
+            HitResult centerHit = level.clip(new ClipContext(
                     p0, p1, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, arrow
             ));
-            if (blockHit.getType() != HitResult.Type.MISS) {
+            if (centerHit.getType() != HitResult.Type.MISS) {
+                return null;
+            }
+
+            HitResult floorMarginHit = level.clip(new ClipContext(
+                    p0.add(clearanceOffset), p1.add(clearanceOffset),
+                    ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, arrow
+            ));
+            if (floorMarginHit.getType() != HitResult.Type.MISS) {
                 return null;
             }
 
@@ -230,4 +247,3 @@ public final class BallisticSolver {
         return Math.sqrt(cx * cx + cy * cy + cz * cz);
     }
 }
-
