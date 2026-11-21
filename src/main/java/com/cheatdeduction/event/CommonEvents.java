@@ -48,8 +48,17 @@ public final class CommonEvents {
     private static final double MOB_SWEEP_RADIUS = 32.0D;
     private static final Map<UUID, Float> FLY_FALL_DIST = new HashMap<>();
     private static final Set<UUID> FLY_FROM_FLIGHT = new HashSet<>();
+    private static final Set<UUID> AIM_LOCKED_PLAYERS = new HashSet<>();
 
     private CommonEvents() {}
+
+    public static void setAimLocked(UUID playerId, boolean locked) {
+        if (locked) {
+            AIM_LOCKED_PLAYERS.add(playerId);
+        } else {
+            AIM_LOCKED_PLAYERS.remove(playerId);
+        }
+    }
 
     @SubscribeEvent
     public static void onServerTick(TickEvent.ServerTickEvent e) {
@@ -62,6 +71,10 @@ public final class CommonEvents {
     public static void onPlayerTick(TickEvent.PlayerTickEvent e) {
         if (e.phase != TickEvent.Phase.END || !(e.player instanceof ServerPlayer p)) return;
         Cheat cheat = GameManager.getCheat(p.getUUID());
+
+        if (cheat != Cheat.AIM_LOCK) {
+            AIM_LOCKED_PLAYERS.remove(p.getUUID());
+        }
 
         AttributeInstance speed = p.getAttribute(Attributes.MOVEMENT_SPEED);
         if (speed != null) {
@@ -166,6 +179,7 @@ public final class CommonEvents {
                     p.onUpdateAbilities();
                 }
             }
+            case AIM_LOCK -> AIM_LOCKED_PLAYERS.remove(p.getUUID());
             case NO_MISS -> LastLookTracker.removeServer(p.getUUID());
             default -> { }
         }
@@ -199,11 +213,16 @@ public final class CommonEvents {
             return;
         }
 
-        if (source.getEntity() instanceof ServerPlayer attacker
-                && GameManager.getCheat(attacker.getUUID()) == Cheat.KILLBOT
-                && !source.is(DamageTypeTags.IS_PROJECTILE)
-                && !(e.getEntity() instanceof Player)) {
-            e.setAmount(Float.MAX_VALUE);
+        if (source.getEntity() instanceof ServerPlayer attacker) {
+            Cheat cheat = GameManager.getCheat(attacker.getUUID());
+
+            if (cheat == Cheat.KILLBOT
+                    && !source.is(DamageTypeTags.IS_PROJECTILE)
+                    && !(e.getEntity() instanceof Player)) {
+                e.setAmount(Float.MAX_VALUE);
+            } else if (cheat == Cheat.AIM_LOCK && AIM_LOCKED_PLAYERS.contains(attacker.getUUID())) {
+                e.setAmount(e.getAmount() * 1.60F);
+            }
         }
     }
 
@@ -218,7 +237,7 @@ public final class CommonEvents {
 
     @SubscribeEvent
     public static void onEntityJoin(EntityJoinLevelEvent e) {
-        if (e.getLevel().isClientSide() || !(e.getEntity() instanceof AbstractArrow arrow)) return;
+               if (e.getLevel().isClientSide() || !(e.getEntity() instanceof AbstractArrow arrow)) return;
         if (!(arrow.getOwner() instanceof ServerPlayer shooter)) return;
         if (GameManager.getCheat(shooter.getUUID()) != Cheat.NO_MISS) return;
         if (arrow.getPersistentData().getBoolean(NOMISS_TAG)) return;
@@ -234,7 +253,7 @@ public final class CommonEvents {
         }
     }
 
-       @SubscribeEvent
+    @SubscribeEvent
     public static void onLogin(PlayerEvent.PlayerLoggedInEvent e) {
         if (e.getEntity() instanceof ServerPlayer p) GameManager.onLogin(p);
     }
@@ -242,6 +261,7 @@ public final class CommonEvents {
     @SubscribeEvent
     public static void onLogout(PlayerEvent.PlayerLoggedOutEvent e) {
         if (e.getEntity() instanceof ServerPlayer p) {
+            AIM_LOCKED_PLAYERS.remove(p.getUUID());
             LastLookTracker.removeServer(p.getUUID());
             GameManager.onLogout(p);
         }
@@ -249,6 +269,7 @@ public final class CommonEvents {
 
     @SubscribeEvent
     public static void onServerStopped(ServerStoppedEvent e) {
+        AIM_LOCKED_PLAYERS.clear();
         LastLookTracker.clearServer();
         GameManager.reset();
     }
