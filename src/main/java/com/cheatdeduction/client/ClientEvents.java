@@ -176,7 +176,7 @@ public final class ClientEvents {
                     if (st.isAir()) continue;
                     if (st.is(Tags.Blocks.ORES)) {
                         float[] col = colorFor(st);
-                        found.add(new OreBox(m.immutable(), col, col, col));
+                       found.add(new OreBox(m.immutable(), col[0], col[1], col[2]));
                     }
                 }
             }
